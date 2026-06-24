@@ -6,6 +6,7 @@ from pipeline.preprocess import run as preprocess_run
 from pipeline.search import ArticleSearch
 from pipeline.deduplicate import deduplicate
 from pipeline.ner import extract_entities, trending_entities
+from pipeline.cluster import cluster_events
 
 st.set_page_config(
     page_title="News Intelligence System",
@@ -152,7 +153,9 @@ searcher: ArticleSearch | None = st.session_state.get("searcher", None)
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3 = st.tabs(["📰  Live Feed", "🔍  Search", "🔬  Analyse Text"])
+tab1, tab_ev, tab2, tab3 = st.tabs(
+    ["📰  Live Feed", "🧩  Events", "🔍  Search", "🔬  Analyse Text"]
+)
 
 # ── Tab 1: Live Feed ──────────────────────────────────────────────────────────
 
@@ -203,6 +206,114 @@ with tab1:
             )
         if shown == 0:
             st.caption("No articles match the selected topics.")
+
+# ── Tab: Events (cross-source clustering) ─────────────────────────────────────
+
+def _tone_label(score: float) -> str:
+    if score >= 0.05:
+        return f"🟢 +{score:.2f}"
+    if score <= -0.05:
+        return f"🔴 {score:.2f}"
+    return f"⚪ {score:.2f}"
+
+
+with tab_ev:
+    st.subheader("Cross-Source Events")
+    st.caption(
+        "Groups articles by the underlying event (agglomerative clustering on "
+        "TF-IDF cosine distance), then shows who's covering each story, the terms "
+        "they share, and where outlets diverge in tone — so one story is one row, "
+        "not forty cards."
+    )
+
+    if not articles:
+        st.info("Fetch articles first using the sidebar.", icon="📡")
+    else:
+        threshold = st.slider(
+            "Clustering sensitivity",
+            min_value=0.50, max_value=0.90, value=0.70, step=0.05,
+            help="Lower = stricter (articles must be more similar to group). "
+                 "Higher = looser (groups looser matches into one event).",
+        )
+
+        clustered = cluster_events(articles, distance_threshold=threshold)
+        events = clustered["events"]
+        singletons = clustered["singletons"]
+
+        if not events:
+            st.caption(
+                "No multi-source events at this sensitivity — every story is "
+                "currently covered by a single article. Try raising the slider."
+            )
+        else:
+            divergent = sum(1 for e in events if e["tone"].get("divergent"))
+            msg = f"**{len(events)}** multi-source event(s) across {len(articles)} articles"
+            if divergent:
+                msg += f" · ⚠️ {divergent} with divergent tone"
+            st.markdown(msg)
+
+        badge_style = (
+            "display:inline-block;font-size:0.7rem;font-family:monospace;"
+            "padding:2px 9px;border-radius:20px;margin:2px 4px 2px 0;"
+            "background:rgba(88,166,255,0.1);color:#58a6ff;border:1px solid #1f6feb44"
+        )
+        term_style = (
+            "display:inline-block;font-size:0.72rem;font-family:monospace;"
+            "padding:1px 8px;border-radius:4px;margin:2px 4px 0 0;"
+            "background:rgba(63,185,80,0.08);color:#3fb950;border:1px solid #23863633"
+        )
+
+        for e in events:
+            rep = e["representative"]
+            sources_html = "".join(
+                f'<span style="{badge_style}">{s} ×{e["source_counts"][s]}</span>'
+                if e["source_counts"][s] > 1 else f'<span style="{badge_style}">{s}</span>'
+                for s in e["sources"]
+            )
+            terms_html = "".join(f'<span style="{term_style}">{t}</span>' for t in e["consensus_terms"])
+
+            tone = e["tone"]
+            tone_html = ""
+            if tone.get("available"):
+                if tone.get("divergent"):
+                    per = " · ".join(f"{s}: {_tone_label(v)}" for s, v in tone["per_source"].items())
+                    tone_html = (
+                        f'<div style="margin-top:8px;font-size:0.78rem;color:#f0883e">'
+                        f'⚠️ Tone diverges across outlets (spread {tone["spread"]:.2f}) — {per}</div>'
+                    )
+                else:
+                    per = " · ".join(f"{s}: {_tone_label(v)}" for s, v in tone["per_source"].items())
+                    tone_html = (
+                        f'<div style="margin-top:8px;font-size:0.78rem;color:#6e7681">'
+                        f'Tone aligned across outlets — {per}</div>'
+                    )
+
+            st.markdown(
+                f'<div class="article-card">'
+                f'<div style="font-size:0.72rem;color:#8b949e;font-family:monospace;margin-bottom:4px">'
+                f'📍 {e["size"]} articles · {len(e["sources"])} sources</div>'
+                f'<div class="article-title">{rep["title"]}</div>'
+                f'<div style="margin-top:8px">{sources_html}</div>'
+                f'<div style="margin-top:8px;font-size:0.72rem;color:#6e7681">Shared terms:</div>'
+                f'<div style="margin-top:2px">{terms_html}</div>'
+                f'{tone_html}'
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            with st.expander(f"All {e['size']} articles in this event"):
+                for m in e["members"]:
+                    st.markdown(
+                        f'**{m["source"]}** — [{m["title"]}]({m["link"]})'
+                        if m["link"] else f'**{m["source"]}** — {m["title"]}'
+                    )
+
+        if singletons:
+            with st.expander(f"{len(singletons)} single-source stories (no cross-coverage)"):
+                for s in singletons:
+                    st.markdown(
+                        f'**{s["source"]}** — [{s["title"]}]({s["link"]})'
+                        if s["link"] else f'**{s["source"]}** — {s["title"]}'
+                    )
 
 # ── Tab 2: Search ─────────────────────────────────────────────────────────────
 

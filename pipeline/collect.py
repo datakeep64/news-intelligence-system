@@ -1,12 +1,19 @@
 import socket
 import feedparser
 
+# Multiple outlets (not just BBC sections) so cross-source event clustering can
+# surface genuine multi-outlet coverage of the same story. Feeds that fail to
+# fetch are skipped gracefully, so the list can grow without breaking the app.
 FEEDS = [
     ("BBC Top Stories", "http://feeds.bbci.co.uk/news/rss.xml"),
     ("BBC Technology", "http://feeds.bbci.co.uk/news/technology/rss.xml"),
     ("BBC Business", "http://feeds.bbci.co.uk/news/business/rss.xml"),
-    ("BBC Science & Environment", "http://feeds.bbci.co.uk/news/science_and_environment/rss.xml"),
     ("BBC World", "http://feeds.bbci.co.uk/news/world/rss.xml"),
+    ("The Guardian World", "https://www.theguardian.com/world/rss"),
+    ("The Guardian Business", "https://www.theguardian.com/uk/business/rss"),
+    ("The Guardian Technology", "https://www.theguardian.com/uk/technology/rss"),
+    ("Sky News", "https://feeds.skynews.com/feeds/rss/home.xml"),
+    ("NPR News", "https://feeds.npr.org/1001/rss.xml"),
 ]
 
 _TIMEOUT_SECONDS = 10
