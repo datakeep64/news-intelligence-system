@@ -57,6 +57,17 @@ def badge(topic: str) -> str:
     )
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _fetch(max_per_feed: int) -> list[dict]:
+    return fetch_articles(max_per_feed=max_per_feed)
+
+
+def _build_searcher(articles: list[dict]) -> ArticleSearch:
+    searcher = ArticleSearch()
+    searcher.index(articles)
+    return searcher
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -64,16 +75,15 @@ with st.sidebar:
     st.caption("End-to-end NLP pipeline for news processing")
     st.divider()
     max_articles = st.slider("Articles per feed", 3, 10, 6)
-    if st.button("Fetch Latest Articles", type="primary", use_container_width=True):
+    fetch_clicked = st.button("Fetch Latest Articles", type="primary", use_container_width=True)
+    if fetch_clicked:
         with st.spinner("Fetching from BBC RSS feeds..."):
-            articles = fetch_articles(max_per_feed=max_articles)
-            st.session_state["articles"] = articles
-            searcher = ArticleSearch()
-            searcher.index(articles)
-            st.session_state["searcher"] = searcher
-        st.success(f"Fetched {len(articles)} articles")
+            fetched = _fetch(max_articles)
+        st.session_state["articles"] = fetched
+        st.session_state["searcher"] = _build_searcher(fetched)
+        st.success(f"Fetched {len(fetched)} articles")
     st.divider()
-    st.caption("Built by [Adhithi M](https://datakeep64.github.io) · [GitHub](https://github.com/datakeep64)")
+    st.caption("Built by [Adhithi M](https://datakeep64.github.io) · [GitHub](https://github.com/datakeep64/news-intelligence-system)")
 
 articles: list[dict] = st.session_state.get("articles", [])
 searcher: ArticleSearch | None = st.session_state.get("searcher", None)
@@ -86,17 +96,22 @@ tab1, tab2, tab3 = st.tabs(["📰  Live Feed", "🔍  Search", "🔬  Analyse Te
 
 with tab1:
     st.subheader("Live Feed")
-    st.caption("Articles fetched from BBC RSS, classified by topic, and summarised.")
+    st.caption("Articles fetched from BBC RSS feeds, classified by topic using TF-IDF cosine similarity.")
 
     if not articles:
         st.info("Click **Fetch Latest Articles** in the sidebar to load the feed.", icon="📡")
     else:
-        topic_filter = st.multiselect(
-            "Filter by topic",
-            options=list(TOPIC_COLOURS.keys()),
-            default=[],
-            placeholder="All topics",
-        )
+        col_info, col_filter = st.columns([1, 2])
+        with col_info:
+            st.caption(f"{len(articles)} articles loaded")
+        with col_filter:
+            topic_filter = st.multiselect(
+                "Filter by topic",
+                options=list(TOPIC_COLOURS.keys()),
+                default=[],
+                placeholder="All topics",
+                label_visibility="collapsed",
+            )
 
         shown = 0
         for article in articles:
@@ -122,19 +137,23 @@ with tab1:
 
 with tab2:
     st.subheader("Semantic Search")
-    st.caption("TF-IDF vector search across all fetched articles.")
+    st.caption("Unigram + bigram TF-IDF vector search across all fetched articles.")
 
     if not articles:
         st.info("Fetch articles first using the sidebar.", icon="📡")
     else:
-        query = st.text_input("Search query", placeholder="e.g. interest rates, climate change, AI regulation")
-        top_k = st.slider("Results", 1, 10, 5)
+        query = st.text_input(
+            "Search query",
+            placeholder="e.g. interest rates, climate change, AI regulation",
+        )
+        top_k = st.slider("Results to show", 1, 10, 5)
 
-        if query:
+        if query and searcher:
             results = searcher.search(query, top_k=top_k)
             if not results:
-                st.caption("No matching articles found.")
+                st.caption("No matching articles found for that query.")
             else:
+                st.caption(f"{len(results)} results")
                 for r in results:
                     topic, _ = classify(f"{r['title']} {r.get('summary', '')}")
                     score_pct = int(r["score"] * 100)
@@ -145,7 +164,7 @@ with tab2:
                         f'<div class="article-summary">{r.get("summary", "")[:220]}</div>'
                         f'<div class="article-meta">{r["source"]} · relevance {score_pct}% · '
                         f'<a href="{r["link"]}" target="_blank" style="color:#58a6ff">Read →</a></div>'
-                        f'<div class="score-bar" style="width:{min(score_pct*4,100)}%"></div>'
+                        f'<div class="score-bar" style="width:{min(score_pct * 4, 100)}%"></div>'
                         f"</div>",
                         unsafe_allow_html=True,
                     )
@@ -154,7 +173,7 @@ with tab2:
 
 with tab3:
     st.subheader("Analyse Any Article")
-    st.caption("Paste any article text — the pipeline runs preprocess → classify → summarise.")
+    st.caption("Paste any article text — the pipeline runs preprocess → classify → summarise and shows each stage.")
 
     sample = (
         "Researchers at MIT have developed a new artificial intelligence system capable of "
@@ -170,7 +189,7 @@ with tab3:
     )
 
     text = st.text_area("Article text", value=sample, height=200)
-    n_sent = st.slider("Summary length (sentences)", 1, 5, 3)
+    n_sent = st.slider("Summary sentences", 1, 5, 3)
 
     if st.button("Run Pipeline", type="primary"):
         if not text.strip():
@@ -181,21 +200,19 @@ with tab3:
             with col1:
                 st.markdown("**① Preprocessing**")
                 result = preprocess_run(text)
-                st.metric("Original tokens", result["original_length"])
-                st.metric("After filtering", len(result["filtered"]))
-                with st.expander("Show top tokens"):
+                st.metric("Original word count", result["original_length"])
+                st.metric("Tokens after filtering", len(result["filtered"]))
+                with st.expander("Show lemmatized tokens"):
                     st.write(", ".join(result["lemmatized"][:30]))
 
             with col2:
                 st.markdown("**② Classification**")
                 topic, scores = classify(text)
-                colour, bg = TOPIC_COLOURS.get(topic, ("#8b949e", "rgba(139,148,158,0.12)"))
                 st.markdown(badge(topic), unsafe_allow_html=True)
-                with st.expander("Category scores"):
-                    sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-                    for cat, score in sorted_scores:
-                        st.progress(score * 10, text=f"{cat}: {score:.3f}")
+                with st.expander("Category similarity scores"):
+                    for cat, score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
+                        st.progress(float(score), text=f"{cat}: {score:.3f}")
 
-            st.markdown("**③ Extractive Summary**")
+            st.markdown("**③ Extractive Summary** *(position-weighted TF-IDF)*")
             summary = extractive(text, n_sentences=n_sent)
             st.info(summary)

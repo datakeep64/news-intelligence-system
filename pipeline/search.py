@@ -5,7 +5,12 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 class ArticleSearch:
     def __init__(self) -> None:
-        self._vectorizer = TfidfVectorizer(stop_words="english", max_features=5000)
+        # Bigrams capture phrases like "interest rates", "climate change"
+        self._vectorizer = TfidfVectorizer(
+            stop_words="english",
+            ngram_range=(1, 2),
+            max_features=8000,
+        )
         self._matrix = None
         self._articles: list[dict] = []
 
@@ -25,3 +30,7 @@ class ArticleSearch:
             for i in top_indices
             if scores[i] > 0
         ]
+
+    @property
+    def indexed(self) -> bool:
+        return self._matrix is not None
