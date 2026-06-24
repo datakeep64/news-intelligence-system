@@ -4,6 +4,8 @@ from pipeline.classify import classify
 from pipeline.summarise import extractive
 from pipeline.preprocess import run as preprocess_run
 from pipeline.search import ArticleSearch
+from pipeline.deduplicate import deduplicate
+from pipeline.ner import extract_entities, trending_entities
 
 st.set_page_config(
     page_title="News Intelligence System",
@@ -23,6 +25,17 @@ st.markdown("""
         font-weight: 600;
         margin-bottom: 6px;
     }
+    .entity-tag {
+        display: inline-block;
+        font-size: 0.7rem;
+        font-family: monospace;
+        padding: 1px 7px;
+        border-radius: 4px;
+        margin: 1px 2px 0 0;
+        background: rgba(88,166,255,0.08);
+        color: #8b949e;
+        border: 1px solid #30363d;
+    }
     .article-card {
         background: #161b22;
         border: 1px solid #30363d;
@@ -34,6 +47,9 @@ st.markdown("""
     .article-summary { font-size: 0.85rem; color: #8b949e; line-height: 1.5; }
     .article-meta { font-size: 0.72rem; color: #6e7681; margin-top: 6px; font-family: monospace; }
     .score-bar { height: 4px; border-radius: 2px; background: #58a6ff; margin-top: 2px; }
+    .trending-item { display: flex; justify-content: space-between; padding: 3px 0; font-size: 0.8rem; }
+    .trending-name { color: #e6edf3; }
+    .trending-count { color: #58a6ff; font-family: monospace; font-size: 0.72rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -57,9 +73,27 @@ def badge(topic: str) -> str:
     )
 
 
+def entity_tags(entities: dict) -> str:
+    tags = []
+    for names in entities.values():
+        for name in names[:2]:  # max 2 per type to keep cards compact
+            tags.append(f'<span class="entity-tag">{name}</span>')
+    return "".join(tags)
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def _fetch(max_per_feed: int) -> list[dict]:
     return fetch_articles(max_per_feed=max_per_feed)
+
+
+@st.cache_resource
+def _get_nlp_warmup():
+    """Warm up spaCy on first load so it doesn't lag on first article fetch."""
+    from pipeline.ner import _get_nlp
+    return _get_nlp()
+
+
+_get_nlp_warmup()
 
 
 def _build_searcher(articles: list[dict]) -> ArticleSearch:
@@ -74,16 +108,44 @@ with st.sidebar:
     st.markdown("## 📡 News Intelligence System")
     st.caption("End-to-end NLP pipeline for news processing")
     st.divider()
+
     max_articles = st.slider("Articles per feed", 3, 10, 6)
     fetch_clicked = st.button("Fetch Latest Articles", type="primary", use_container_width=True)
+
     if fetch_clicked:
         with st.spinner("Fetching from BBC RSS feeds..."):
-            fetched = _fetch(max_articles)
-        st.session_state["articles"] = fetched
-        st.session_state["searcher"] = _build_searcher(fetched)
-        st.success(f"Fetched {len(fetched)} articles")
+            raw = _fetch(max_articles)
+        deduped, removed = deduplicate(raw)
+        st.session_state["articles"] = deduped
+        st.session_state["searcher"] = _build_searcher(deduped)
+        msg = f"Fetched {len(deduped)} articles"
+        if removed:
+            msg += f" ({removed} duplicate{'s' if removed > 1 else ''} removed)"
+        st.success(msg)
+
+    # Trending entities panel — shown once articles are loaded
+    articles_loaded: list[dict] = st.session_state.get("articles", [])
+    if articles_loaded:
+        st.divider()
+        st.markdown("**Trending Now**")
+        with st.spinner(""):
+            trends = trending_entities(articles_loaded, top_n=5)
+        for label, items in trends.items():
+            st.caption(label)
+            for name, count in items[:4]:
+                st.markdown(
+                    f'<div class="trending-item">'
+                    f'<span class="trending-name">{name}</span>'
+                    f'<span class="trending-count">×{count}</span>'
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
     st.divider()
-    st.caption("Built by [Adhithi M](https://datakeep64.github.io) · [GitHub](https://github.com/datakeep64/news-intelligence-system)")
+    st.caption(
+        "Built by [Adhithi M](https://datakeep64.github.io) · "
+        "[GitHub](https://github.com/datakeep64/news-intelligence-system)"
+    )
 
 articles: list[dict] = st.session_state.get("articles", [])
 searcher: ArticleSearch | None = st.session_state.get("searcher", None)
@@ -96,14 +158,17 @@ tab1, tab2, tab3 = st.tabs(["📰  Live Feed", "🔍  Search", "🔬  Analyse Te
 
 with tab1:
     st.subheader("Live Feed")
-    st.caption("Articles fetched from BBC RSS feeds, classified by topic using TF-IDF cosine similarity.")
+    st.caption(
+        "Articles classified by topic (TF-IDF cosine similarity) with "
+        "named entities extracted via spaCy."
+    )
 
     if not articles:
         st.info("Click **Fetch Latest Articles** in the sidebar to load the feed.", icon="📡")
     else:
         col_info, col_filter = st.columns([1, 2])
         with col_info:
-            st.caption(f"{len(articles)} articles loaded")
+            st.caption(f"{len(articles)} articles")
         with col_filter:
             topic_filter = st.multiselect(
                 "Filter by topic",
@@ -115,16 +180,22 @@ with tab1:
 
         shown = 0
         for article in articles:
-            topic, _ = classify(f"{article['title']} {article.get('summary', '')}")
+            text = f"{article['title']} {article.get('summary', '')}"
+            topic, _ = classify(text)
             if topic_filter and topic not in topic_filter:
                 continue
+
             summary_text = article.get("summary", "")
+            entities = extract_entities(text)
+            tags_html = entity_tags(entities)
             shown += 1
+
             st.markdown(
                 f'<div class="article-card">'
                 f'{badge(topic)}'
                 f'<div class="article-title">{article["title"]}</div>'
                 f'<div class="article-summary">{summary_text[:280]}{"…" if len(summary_text) > 280 else ""}</div>'
+                f'{"<div style=margin-top:6px>" + tags_html + "</div>" if tags_html else ""}'
                 f'<div class="article-meta">{article["source"]} · '
                 f'<a href="{article["link"]}" target="_blank" style="color:#58a6ff">Read →</a></div>'
                 f"</div>",
@@ -173,7 +244,7 @@ with tab2:
 
 with tab3:
     st.subheader("Analyse Any Article")
-    st.caption("Paste any article text — the pipeline runs preprocess → classify → summarise and shows each stage.")
+    st.caption("Paste any article text — runs preprocess → NER → classify → summarise.")
 
     sample = (
         "Researchers at MIT have developed a new artificial intelligence system capable of "
@@ -206,13 +277,26 @@ with tab3:
                     st.write(", ".join(result["lemmatized"][:30]))
 
             with col2:
-                st.markdown("**② Classification**")
-                topic, scores = classify(text)
-                st.markdown(badge(topic), unsafe_allow_html=True)
-                with st.expander("Category similarity scores"):
-                    for cat, score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
-                        st.progress(float(score), text=f"{cat}: {score:.3f}")
+                st.markdown("**② Named Entities**")
+                entities = extract_entities(text)
+                if entities:
+                    label_map = {"PERSON": "People", "ORG": "Organisations", "GPE": "Places", "NORP": "Groups"}
+                    for label, names in entities.items():
+                        st.caption(label_map.get(label, label))
+                        st.markdown(
+                            " ".join(f'<span class="entity-tag">{n}</span>' for n in names),
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    st.caption("No named entities detected.")
 
-            st.markdown("**③ Extractive Summary** *(position-weighted TF-IDF)*")
+            st.markdown("**③ Classification**")
+            topic, scores = classify(text)
+            st.markdown(badge(topic), unsafe_allow_html=True)
+            with st.expander("Category similarity scores"):
+                for cat, score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
+                    st.progress(float(score), text=f"{cat}: {score:.3f}")
+
+            st.markdown("**④ Extractive Summary** *(position-weighted TF-IDF)*")
             summary = extractive(text, n_sentences=n_sent)
             st.info(summary)
